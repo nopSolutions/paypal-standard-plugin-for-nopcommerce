@@ -43,14 +43,15 @@ public class PayPalStandardHttpClient
     /// </returns>
     public async Task<string> GetPdtDetailsAsync(string tx)
     {
-        //get response
         var url = _payPalStandardPaymentSettings.UseSandbox ?
             "https://www.sandbox.paypal.com/us/cgi-bin/webscr" :
             "https://www.paypal.com/us/cgi-bin/webscr";
         var requestContent = new StringContent($"cmd=_notify-synch&at={_payPalStandardPaymentSettings.PdtToken}&tx={tx}",
             Encoding.UTF8, MimeTypes.ApplicationXWwwFormUrlencoded);
+
+        //get response
         var response = await _httpClient.PostAsync(url, requestContent);
-        response.EnsureSuccessStatusCode();
+
         return await response.Content.ReadAsStringAsync();
     }
 
@@ -64,14 +65,15 @@ public class PayPalStandardHttpClient
     /// </returns>
     public async Task<string> VerifyIpnAsync(string formString)
     {
-        //get response
         var url = _payPalStandardPaymentSettings.UseSandbox ?
             "https://ipnpb.sandbox.paypal.com/cgi-bin/webscr" :
             "https://ipnpb.paypal.com/cgi-bin/webscr";
         var requestContent = new StringContent($"cmd=_notify-validate&{formString}",
             Encoding.UTF8, MimeTypes.ApplicationXWwwFormUrlencoded);
+
+        //get response
         var response = await _httpClient.PostAsync(url, requestContent);
-        response.EnsureSuccessStatusCode();
+
         return await response.Content.ReadAsStringAsync();
     }
 
