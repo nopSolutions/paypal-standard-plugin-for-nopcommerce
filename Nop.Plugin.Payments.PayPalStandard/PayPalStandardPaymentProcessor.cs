@@ -94,7 +94,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     #endregion
 
     #region Utilities
-        
+
     /// <summary>
     /// Create common query parameters for the request
     /// </summary>
@@ -189,23 +189,23 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
         var customer = await _customerService.GetCustomerByIdAsync(postProcessPaymentRequest.Order.CustomerId);
 
         await foreach (var (attribute, values) in checkoutAttributeValues)
-        await foreach (var attributeValue in values)
-        {
-            var (attributePrice, _) = await _taxService.GetCheckoutAttributePriceAsync(attribute, attributeValue, false, customer);
-            var roundedAttributePrice = Math.Round(attributePrice, 2);
+            await foreach (var attributeValue in values)
+            {
+                var (attributePrice, _) = await _taxService.GetCheckoutAttributePriceAsync(attribute, attributeValue, false, customer);
+                var roundedAttributePrice = Math.Round(attributePrice, 2);
 
-            //add query parameters
-            if (attribute == null)
-                continue;
+                //add query parameters
+                if (attribute == null)
+                    continue;
 
-            parameters.Add($"item_name_{itemCount}", attribute.Name);
-            parameters.Add($"amount_{itemCount}", roundedAttributePrice.ToString("0.00", CultureInfo.InvariantCulture));
-            parameters.Add($"quantity_{itemCount}", "1");
+                parameters.Add($"item_name_{itemCount}", attribute.Name);
+                parameters.Add($"amount_{itemCount}", roundedAttributePrice.ToString("0.00", CultureInfo.InvariantCulture));
+                parameters.Add($"quantity_{itemCount}", "1");
 
-            cartTotal += attributePrice;
-            roundedCartTotal += roundedAttributePrice;
-            itemCount++;
-        }
+                cartTotal += attributePrice;
+                roundedCartTotal += roundedAttributePrice;
+                itemCount++;
+            }
 
         //add shipping fee as a separate order item, if it has price
         var roundedShippingPrice = Math.Round(postProcessPaymentRequest.Order.OrderShippingExclTax, 2);
@@ -293,15 +293,20 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     public async Task<(bool result, Dictionary<string, string> values)> VerifyIpnAsync(string formString)
     {
         var response = WebUtility.UrlDecode(await _payPalStandardHttpClient.VerifyIpnAsync(formString));
+
+        if (string.IsNullOrEmpty(response))
+            return (false, null);
+
         var success = response.Trim().Equals("VERIFIED", StringComparison.OrdinalIgnoreCase);
 
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var l in formString.Split('&'))
         {
             var line = l.Trim();
             var equalPox = line.IndexOf('=');
             if (equalPox >= 0)
-                values.Add(line[0..equalPox], line[(equalPox + 1)..]);
+                values.Add(line[..equalPox], line[(equalPox + 1)..]);
         }
 
         return (success, values);
@@ -319,8 +324,12 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     {
         var response = WebUtility.UrlDecode(await _payPalStandardHttpClient.GetPdtDetailsAsync(tx));
 
+        if (string.IsNullOrEmpty(response))
+            return (false, [], null);
+
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         bool firstLine = true, success = false;
+
         foreach (var l in response.Split('\n'))
         {
             var line = l.Trim();
@@ -333,14 +342,13 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
             {
                 var equalPox = line.IndexOf('=');
                 if (equalPox >= 0)
-                    values.Add(line[0..equalPox], line[(equalPox + 1)..]);
+                    values.Add(line[..equalPox], line[(equalPox + 1)..]);
             }
         }
 
         return (success, values, response);
     }
-
-
+    
     /// <summary>
     /// Process a payment
     /// </summary>

@@ -291,7 +291,7 @@ public class PaymentPayPalStandardController : BasePaymentController
             }
             catch
             {
-                // ignored
+                await _logger.ErrorAsync("PayPal PDT failed. " + response);
             }
 
             var order = await _orderService.GetOrderByGuidAsync(orderNumberGuid);
