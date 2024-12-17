@@ -28,7 +28,6 @@ public class PaymentPayPalStandardController : BasePaymentController
     private readonly IOrderProcessingService _orderProcessingService;
     private readonly IOrderService _orderService;
     private readonly IPaymentPluginManager _paymentPluginManager;
-    private readonly IPermissionService _permissionService;
     private readonly ILocalizationService _localizationService;
     private readonly ILogger _logger;
     private readonly INotificationService _notificationService;
@@ -46,7 +45,6 @@ public class PaymentPayPalStandardController : BasePaymentController
         IOrderProcessingService orderProcessingService,
         IOrderService orderService,
         IPaymentPluginManager paymentPluginManager,
-        IPermissionService permissionService,
         ILocalizationService localizationService,
         ILogger logger,
         INotificationService notificationService,
@@ -60,7 +58,6 @@ public class PaymentPayPalStandardController : BasePaymentController
         _orderProcessingService = orderProcessingService;
         _orderService = orderService;
         _paymentPluginManager = paymentPluginManager;
-        _permissionService = permissionService;
         _localizationService = localizationService;
         _logger = logger;
         _notificationService = notificationService;
@@ -77,11 +74,9 @@ public class PaymentPayPalStandardController : BasePaymentController
 
     [AuthorizeAdmin]
     [Area(AreaNames.ADMIN)]
+    [CheckPermission(StandardPermission.Configuration.MANAGE_PAYMENT_METHODS)]
     public async Task<IActionResult> Configure()
     {
-        if (!await _permissionService.AuthorizeAsync(StandardPermissionProvider.ManagePaymentMethods))
-            return AccessDeniedView();
-
         //load settings for a chosen store scope
         var storeScope = await _storeContext.GetActiveStoreScopeConfigurationAsync();
         var payPalStandardPaymentSettings = await _settingService.LoadSettingAsync<PayPalStandardPaymentSettings>(storeScope);
@@ -112,12 +107,10 @@ public class PaymentPayPalStandardController : BasePaymentController
 
     [HttpPost]
     [AuthorizeAdmin]
-    [Area(AreaNames.ADMIN)]        
+    [Area(AreaNames.ADMIN)]
+    [CheckPermission(StandardPermission.Configuration.MANAGE_PAYMENT_METHODS)]
     public async Task<IActionResult> Configure(ConfigurationModel model)
     {
-        if (!await _permissionService.AuthorizeAsync(StandardPermissionProvider.ManagePaymentMethods))
-            return AccessDeniedView();
-
         if (!ModelState.IsValid)
             return await Configure();
 
@@ -154,11 +147,9 @@ public class PaymentPayPalStandardController : BasePaymentController
     //action displaying notification (warning) to a store owner about inaccurate PayPal rounding
     [AuthorizeAdmin]
     [Area(AreaNames.ADMIN)]
+    [CheckPermission(StandardPermission.Configuration.MANAGE_PAYMENT_METHODS)]
     public async Task<IActionResult> RoundingWarning(bool passProductNamesAndTotals)
     {
-        if (!await _permissionService.AuthorizeAsync(StandardPermissionProvider.ManagePaymentMethods))
-            return AccessDeniedView();
-
         //prices and total aren't rounded, so display warning
         if (passProductNamesAndTotals && !_shoppingCartSettings.RoundPricesDuringCalculation)
             return Json(new { Result = await _localizationService.GetResourceAsync("Plugins.Payments.PayPalStandard.RoundingWarning") });
