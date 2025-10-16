@@ -1,16 +1,22 @@
-﻿@model Nop.Plugin.Payments.PayPalStandard.Models.ConfigurationModel
-@inject Nop.Core.IWebHelper webHelper
+﻿@model ConfigurationModel
+
 @{
     Layout = "_ConfigurePlugin";
+
+    var warning = "<b>Please note:</b> The PayPal Standard payment plugin is deprecated by PayPal. We strongly recommend upgrading to <b>PayPal Commerce</b> to avoid disruption. All the PayPal Standard features and many more updates are now available for the <a href=\"https://www.nopcommerce.com/paypal-commerce-the-official-integration\" target=\"_blank\">PayPal Commerce plugin by nopCommerce</a>. Use our <a href=\"https://docs.nopcommerce.com/en/getting-started/configure-payments/payment-methods/paypal-commerce.html\" target=\"_blank\">step-by-step guide</a> to configure PayPal Commerce.";
 }
 
 @await Component.InvokeAsync(typeof(StoreScopeConfigurationViewComponent))
 
 <script>
-	$(document).ready(function () {
-        $("#@Html.IdFor(model => model.PassProductNamesAndTotals)").click(togglePassProductNamesAndTotals);
-	    togglePassProductNamesAndTotals();
-	});
+    $(function () {
+        $('#@Html.IdFor(model => model.PassProductNamesAndTotals)').click(togglePassProductNamesAndTotals);
+        togglePassProductNamesAndTotals();
+        const isActive = @Model.IsActive.ToString().ToLower();
+        if (isActive) {
+            displayBarNotification('@Html.Raw(warning)', 2);
+        }
+    });
 
     function togglePassProductNamesAndTotals() {
         warningValidation('@Url.Action("RoundingWarning", "PaymentPayPalStandard")', '@Html.NameFor(model => model.PassProductNamesAndTotals)',
@@ -22,7 +28,11 @@
     <div class="cards-group">
         <div class="card card-default">
             <div class="card-body">
-                @Html.Raw(T("Plugins.Payments.PayPalStandard.Instructions", $"{webHelper.GetStoreLocation()}Plugins/PaymentPayPalStandard/PDTHandler"))
+                @if (!Model.IsActive)
+                {
+                    <p style="border: solid 3px; border-color: #ffc107; padding: 20px 10px 20px 10px;">@Html.Raw(warning)</p>
+                }
+                @Html.Raw(T("Plugins.Payments.PayPalStandard.Instructions", Model.PdtUrl))
                 <div class="form-group row">
                     <div class="col-md-3">
                         <nop-override-store-checkbox asp-for="UseSandbox_OverrideForStore" asp-input="UseSandbox" asp-store-scope="@Model.ActiveStoreScopeConfiguration" />

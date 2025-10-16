@@ -1,6 +1,6 @@
 ﻿using System.ComponentModel.DataAnnotations;
-using Nop.Web.Framework.Mvc.ModelBinding;
 using Nop.Web.Framework.Models;
+using Nop.Web.Framework.Mvc.ModelBinding;
 
 namespace Nop.Plugin.Payments.PayPalStandard.Models;
 
@@ -32,4 +32,7 @@ public record ConfigurationModel : BaseNopModel
     [NopResourceDisplayName("Plugins.Payments.PayPalStandard.Fields.AdditionalFeePercentage")]
     public bool AdditionalFeePercentage { get; set; }
     public bool AdditionalFeePercentage_OverrideForStore { get; set; }
+
+    public string PdtUrl { get; set; }
+    public bool IsActive { get; set; }
 }

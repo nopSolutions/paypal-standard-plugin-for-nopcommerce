@@ -34,5 +34,5 @@ public class NopStartup : INopStartup
     /// <summary>
     /// Gets order of this startup configuration implementation
     /// </summary>
-    public int Order => 3000;
+    public int Order => 1;
 }

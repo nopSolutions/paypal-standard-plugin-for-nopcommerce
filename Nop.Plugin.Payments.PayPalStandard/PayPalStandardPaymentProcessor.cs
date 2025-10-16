@@ -19,6 +19,7 @@ using Nop.Services.Orders;
 using Nop.Services.Payments;
 using Nop.Services.Plugins;
 using Nop.Services.Tax;
+using Nop.Web.Framework.Mvc.Routing;
 
 namespace Nop.Plugin.Payments.PayPalStandard;
 
@@ -38,6 +39,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     private readonly IGenericAttributeService _genericAttributeService;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILocalizationService _localizationService;
+    private readonly INopUrlHelper _nopUrlHelper;
     private readonly IOrderService _orderService;
     private readonly IOrderTotalCalculationService _orderTotalCalculationService;
     private readonly IProductService _productService;
@@ -61,6 +63,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
         IGenericAttributeService genericAttributeService,
         IHttpContextAccessor httpContextAccessor,
         ILocalizationService localizationService,
+        INopUrlHelper nopUrlHelper,
         IOrderService orderService,
         IOrderTotalCalculationService orderTotalCalculationService,
         IProductService productService,
@@ -80,6 +83,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
         _genericAttributeService = genericAttributeService;
         _httpContextAccessor = httpContextAccessor;
         _localizationService = localizationService;
+        _nopUrlHelper = nopUrlHelper;
         _orderService = orderService;
         _orderTotalCalculationService = orderTotalCalculationService;
         _productService = productService;
@@ -103,14 +107,12 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     /// A task that represents the asynchronous operation
     /// The task result contains the created query parameters
     /// </returns>
-    private async Task<IDictionary<string, string>> CreateQueryParametersAsync(PostProcessPaymentRequest postProcessPaymentRequest)
+    private async Task<Dictionary<string, string>> CreateQueryParametersAsync(PostProcessPaymentRequest postProcessPaymentRequest)
     {
-        //get store location
-        var storeLocation = _webHelper.GetStoreLocation();
+        var order = postProcessPaymentRequest.Order;
 
         //choosing correct order address
-        var orderAddress = await _addressService.GetAddressByIdAsync(
-            (postProcessPaymentRequest.Order.PickupInStore ? postProcessPaymentRequest.Order.PickupAddressId : postProcessPaymentRequest.Order.ShippingAddressId) ?? 0);
+        var orderAddress = await _addressService.GetAddressByIdAsync((order.PickupInStore ? order.PickupAddressId : order.ShippingAddressId) ?? 0);
 
         //create query parameters
         return new Dictionary<string, string>
@@ -124,21 +126,21 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
             //set return method to "2" (the customer redirected to the return URL by using the POST method, and all payment variables are included)
             ["rm"] = "2",
 
-            ["bn"] = PayPalHelper.NopCommercePartnerCode,
+            ["bn"] = PayPalStandardDefaults.PartnerCode,
             ["currency_code"] = (await _currencyService.GetCurrencyByIdAsync(_currencySettings.PrimaryStoreCurrencyId))?.CurrencyCode,
 
             //order identifier
-            ["invoice"] = postProcessPaymentRequest.Order.CustomOrderNumber,
-            ["custom"] = postProcessPaymentRequest.Order.OrderGuid.ToString(),
+            ["invoice"] = order.CustomOrderNumber,
+            ["custom"] = order.OrderGuid.ToString(),
 
             //PDT, IPN and cancel URL
-            ["return"] = $"{storeLocation}Plugins/PaymentPayPalStandard/PDTHandler",
-            ["notify_url"] = $"{storeLocation}Plugins/PaymentPayPalStandard/IPNHandler",
-            ["cancel_return"] = $"{storeLocation}Plugins/PaymentPayPalStandard/CancelOrder",
+            ["return"] = _nopUrlHelper.RouteUrl(PayPalStandardDefaults.Route.PDTHandler, null, _webHelper.GetCurrentRequestProtocol()),
+            ["notify_url"] = _nopUrlHelper.RouteUrl(PayPalStandardDefaults.Route.IPNHandler, null, _webHelper.GetCurrentRequestProtocol()),
+            ["cancel_return"] = _nopUrlHelper.RouteUrl(PayPalStandardDefaults.Route.CancelOrder, new { orderId = order.Id }, _webHelper.GetCurrentRequestProtocol()),
 
             //shipping address, if exists
-            ["no_shipping"] = postProcessPaymentRequest.Order.ShippingStatus == ShippingStatus.ShippingNotRequired ? "1" : "2",
-            ["address_override"] = postProcessPaymentRequest.Order.ShippingStatus == ShippingStatus.ShippingNotRequired ? "0" : "1",
+            ["no_shipping"] = order.ShippingStatus == ShippingStatus.ShippingNotRequired ? "1" : "2",
+            ["address_override"] = order.ShippingStatus == ShippingStatus.ShippingNotRequired ? "0" : "1",
             ["first_name"] = orderAddress?.FirstName,
             ["last_name"] = orderAddress?.LastName,
             ["address1"] = orderAddress?.Address1,
@@ -157,7 +159,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     /// <param name="parameters">Query parameters</param>
     /// <param name="postProcessPaymentRequest">Payment info required for an order processing</param>
     /// <returns>A task that represents the asynchronous operation</returns>
-    private async Task AddItemsParametersAsync(IDictionary<string, string> parameters, PostProcessPaymentRequest postProcessPaymentRequest)
+    private async Task AddItemsParametersAsync(Dictionary<string, string> parameters, PostProcessPaymentRequest postProcessPaymentRequest)
     {
         //upload order items
         parameters.Add("cmd", "_cart");
@@ -168,14 +170,16 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
         var itemCount = 1;
 
         //add shopping cart items
-        foreach (var item in await _orderService.GetOrderItemsAsync(postProcessPaymentRequest.Order.Id))
+        var orderItems = await _orderService.GetOrderItemsAsync(postProcessPaymentRequest.Order.Id);
+        var products = await _productService.GetProductsByIdsAsync(orderItems.Select(item => item.ProductId).Distinct().ToArray());
+        foreach (var item in orderItems)
         {
             var roundedItemPrice = Math.Round(item.UnitPriceExclTax, 2);
 
-            var product = await _productService.GetProductByIdAsync(item.ProductId);
+            var product = products.FirstOrDefault(p => p.Id == item.ProductId);
 
             //add query parameters
-            parameters.Add($"item_name_{itemCount}", product.Name);
+            parameters.Add($"item_name_{itemCount}", product?.Name);
             parameters.Add($"amount_{itemCount}", roundedItemPrice.ToString("0.00", CultureInfo.InvariantCulture));
             parameters.Add($"quantity_{itemCount}", item.Quantity.ToString());
 
@@ -189,6 +193,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
         var customer = await _customerService.GetCustomerByIdAsync(postProcessPaymentRequest.Order.CustomerId);
 
         await foreach (var (attribute, values) in checkoutAttributeValues)
+        {
             await foreach (var attributeValue in values)
             {
                 var (attributePrice, _) = await _taxService.GetCheckoutAttributePriceAsync(attribute, attributeValue, false, customer);
@@ -206,6 +211,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
                 roundedCartTotal += roundedAttributePrice;
                 itemCount++;
             }
+        }
 
         //add shipping fee as a separate order item, if it has price
         var roundedShippingPrice = Math.Round(postProcessPaymentRequest.Order.OrderShippingExclTax, 2);
@@ -256,7 +262,8 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
         }
 
         //save order total that actually sent to PayPal (used for PDT order total validation)
-        await _genericAttributeService.SaveAttributeAsync(postProcessPaymentRequest.Order, PayPalHelper.OrderTotalSentToPayPal, roundedCartTotal);
+        await _genericAttributeService
+            .SaveAttributeAsync(postProcessPaymentRequest.Order, PayPalStandardDefaults.OrderTotalAttributeName, roundedCartTotal);
     }
 
     /// <summary>
@@ -265,7 +272,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     /// <param name="parameters">Query parameters</param>
     /// <param name="postProcessPaymentRequest">Payment info required for an order processing</param>
     /// <returns>A task that represents the asynchronous operation</returns>
-    private async Task AddOrderTotalParametersAsync(IDictionary<string, string> parameters, PostProcessPaymentRequest postProcessPaymentRequest)
+    private async Task AddOrderTotalParametersAsync(Dictionary<string, string> parameters, PostProcessPaymentRequest postProcessPaymentRequest)
     {
         //round order total
         var roundedOrderTotal = Math.Round(postProcessPaymentRequest.Order.OrderTotal, 2);
@@ -275,7 +282,8 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
         parameters.Add("amount", roundedOrderTotal.ToString("0.00", CultureInfo.InvariantCulture));
 
         //save order total that actually sent to PayPal (used for PDT order total validation)
-        await _genericAttributeService.SaveAttributeAsync(postProcessPaymentRequest.Order, PayPalHelper.OrderTotalSentToPayPal, roundedOrderTotal);
+        await _genericAttributeService
+            .SaveAttributeAsync(postProcessPaymentRequest.Order, PayPalStandardDefaults.OrderTotalAttributeName, roundedOrderTotal);
     }
 
     #endregion
@@ -292,14 +300,21 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     /// </returns>
     public async Task<(bool result, Dictionary<string, string> values)> VerifyIpnAsync(string formString)
     {
-        var response = WebUtility.UrlDecode(await _payPalStandardHttpClient.VerifyIpnAsync(formString));
-
-        if (string.IsNullOrEmpty(response))
-            return (false, null);
-
-        var success = response.Trim().Equals("VERIFIED", StringComparison.OrdinalIgnoreCase);
+        var response = string.Empty;
+        try
+        {
+            response = await _payPalStandardHttpClient.VerifyIpnAsync(formString);
+            response = WebUtility.UrlDecode(response);
+            if (string.IsNullOrEmpty(response))
+                throw new NopException("No response");
+        }
+        catch
+        {
+            return default;
+        }
 
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var success = response.Trim().Equals("VERIFIED", StringComparison.OrdinalIgnoreCase);
 
         foreach (var l in formString.Split('&'))
         {
@@ -322,13 +337,23 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     /// </returns>
     public async Task<(bool result, Dictionary<string, string> values, string response)> GetPdtDetailsAsync(string tx)
     {
-        var response = WebUtility.UrlDecode(await _payPalStandardHttpClient.GetPdtDetailsAsync(tx));
+        var response = string.Empty;
+        try
+        {
+            response = await _payPalStandardHttpClient.GetPdtDetailsAsync(tx);
+            response = WebUtility.UrlDecode(response);
 
-        if (string.IsNullOrEmpty(response))
-            return (false, [], null);
+            if (string.IsNullOrEmpty(response))
+                throw new NopException("No response");
+        }
+        catch
+        {
+            return default;
+        }
 
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        bool firstLine = true, success = false;
+        var firstLine = true;
+        var success = false;
 
         foreach (var l in response.Split('\n'))
         {
@@ -348,7 +373,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
 
         return (success, values, response);
     }
-    
+
     /// <summary>
     /// Process a payment
     /// </summary>
@@ -369,9 +394,9 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     /// <returns>A task that represents the asynchronous operation</returns>
     public async Task PostProcessPaymentAsync(PostProcessPaymentRequest postProcessPaymentRequest)
     {
-        var baseUrl = _payPalStandardPaymentSettings.UseSandbox ?
-            "https://www.sandbox.paypal.com/us/cgi-bin/webscr" :
-            "https://www.paypal.com/us/cgi-bin/webscr";
+        var baseUrl = _payPalStandardPaymentSettings.UseSandbox
+            ? PayPalStandardDefaults.ServiceUrl.Sandbox
+            : PayPalStandardDefaults.ServiceUrl.Live;
 
         //create common query parameters for the request
         var queryParameters = await CreateQueryParametersAsync(postProcessPaymentRequest);
@@ -384,7 +409,8 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
             await AddItemsParametersAsync(parameters, postProcessPaymentRequest);
 
             //remove null values from parameters
-            parameters = parameters.Where(parameter => !string.IsNullOrEmpty(parameter.Value))
+            parameters = parameters
+                .Where(parameter => !string.IsNullOrEmpty(parameter.Value))
                 .ToDictionary(parameter => parameter.Key, parameter => parameter.Value);
 
             //ensure redirect URL doesn't exceed 2K chars to avoid "too long URL" exception
@@ -400,7 +426,8 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
         await AddOrderTotalParametersAsync(queryParameters, postProcessPaymentRequest);
 
         //remove null values from parameters
-        queryParameters = queryParameters.Where(parameter => !string.IsNullOrEmpty(parameter.Value))
+        queryParameters = queryParameters
+            .Where(parameter => !string.IsNullOrEmpty(parameter.Value))
             .ToDictionary(parameter => parameter.Key, parameter => parameter.Value);
 
         var url = QueryHelpers.AddQueryString(baseUrl, queryParameters);
@@ -512,8 +539,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     /// </returns>
     public Task<bool> CanRePostProcessPaymentAsync(Order order)
     {
-        if (order == null)
-            throw new ArgumentNullException(nameof(order));
+        ArgumentNullException.ThrowIfNull(order);
 
         //let's ensure that at least 5 seconds passed after order is placed
         //P.S. there's no any particular reason for that. we just do it
@@ -554,7 +580,7 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
     /// </summary>
     public override string GetConfigurationPageUrl()
     {
-        return $"{_webHelper.GetStoreLocation()}Admin/PaymentPayPalStandard/Configure";
+        return _nopUrlHelper.RouteUrl(PayPalStandardDefaults.Route.Configuration);
     }
 
     /// <summary>
@@ -595,25 +621,24 @@ public class PayPalStandardPaymentProcessor : BasePlugin, IPaymentMethod
             ["Plugins.Payments.PayPalStandard.Fields.UseSandbox"] = "Use Sandbox",
             ["Plugins.Payments.PayPalStandard.Fields.UseSandbox.Hint"] = "Check to enable Sandbox (testing environment).",
             ["Plugins.Payments.PayPalStandard.Instructions"] = @"
-                    <p>
-	                    <b>If you're using this gateway ensure that your primary store currency is supported by PayPal.</b>
-	                    <br />
-	                    <br />To use PDT, you must activate PDT and Auto Return in your PayPal account profile. You must also acquire a PDT identity token, which is used in all PDT communication you send to PayPal. Follow these steps to configure your account for PDT:<br />
-	                    <br />1. Log in to your PayPal account (click <a href=""https://www.paypal.com/us/webapps/mpp/referral/paypal-business-account2?partner_id=9JJPJNNPQ7PZ8"" target=""_blank"">here</a> to create your account).
-	                    <br />2. Click on the Profile button.
-	                    <br />3. Click on the <b>Account Settings</b> link.
-	                    <br />4. Select the <b>Website payments</b> item on left panel.
-	                    <br />5. Find <b>Website Preferences</b> and click on the <b>Update</b> link.
-	                    <br />6. Under <b>Auto Return</b> for <b>Website payments preferences</b>, select the <b>On</b> radio button.
-	                    <br />7. For the <b>Return URL</b>, enter and save the URL on your site that will receive the transaction ID posted by PayPal after a customer payment (<em>{0}</em>).
-                        <br />8. Under <b>Payment Data Transfer</b>, select the <b>On</b> radio button and get your <b>Identity token</b>.
-	                    <br />9. Enter <b>Identity token</b> in the field below on the plugin configuration page.
-                        <br />10. Click <b>Save</b> button on this page.
-	                    <br />
-                    </p>",
+                <p>
+                    <b>If you're using this gateway ensure that your primary store currency is supported by PayPal.</b>
+                    <br />
+                    <br />To use PDT, you must activate PDT and Auto Return in your PayPal account profile. You must also acquire a PDT identity token, which is used in all PDT communication you send to PayPal. Follow these steps to configure your account for PDT:<br />
+                    <br />1. Log in to your PayPal account (click <a href=""https://www.paypal.com/us/webapps/mpp/referral/paypal-business-account2?partner_id=9JJPJNNPQ7PZ8"" target=""_blank"">here</a> to create your account).
+                    <br />2. Click on the Profile button.
+                    <br />3. Click on the <b>Account Settings</b> link.
+                    <br />4. Select the <b>Website payments</b> item on left panel.
+                    <br />5. Find <b>Website Preferences</b> and click on the <b>Update</b> link.
+                    <br />6. Under <b>Auto Return</b> for <b>Website payments preferences</b>, select the <b>On</b> radio button.
+                    <br />7. For the <b>Return URL</b>, enter and save the URL on your site that will receive the transaction ID posted by PayPal after a customer payment (<em>{0}</em>).
+                    <br />8. Under <b>Payment Data Transfer</b>, select the <b>On</b> radio button and get your <b>Identity token</b>.
+                    <br />9. Enter <b>Identity token</b> in the field below on the plugin configuration page.
+                    <br />10. Click <b>Save</b> button on this page.
+                    <br />
+                </p>",
             ["Plugins.Payments.PayPalStandard.PaymentMethodDescription"] = "You will be redirected to PayPal site to complete the payment",
             ["Plugins.Payments.PayPalStandard.RoundingWarning"] = "It looks like you have \"ShoppingCartSettings.RoundPricesDuringCalculation\" setting disabled. Keep in mind that this can lead to a discrepancy of the order total amount, as PayPal only rounds to two decimals.",
-
         });
 
         await base.InstallAsync();

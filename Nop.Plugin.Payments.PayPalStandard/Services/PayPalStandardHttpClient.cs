@@ -22,8 +22,8 @@ public class PayPalStandardHttpClient
         PayPalStandardPaymentSettings payPalStandardPaymentSettings)
     {
         //configure client
-        client.Timeout = TimeSpan.FromSeconds(20);
-        client.DefaultRequestHeaders.Add(HeaderNames.UserAgent, $"nopCommerce-{NopVersion.CURRENT_VERSION}");
+        client.Timeout = TimeSpan.FromSeconds(PayPalStandardDefaults.RequestTimeout);
+        client.DefaultRequestHeaders.Add(HeaderNames.UserAgent, PayPalStandardDefaults.UserAgent);
 
         _httpClient = client;
         _payPalStandardPaymentSettings = payPalStandardPaymentSettings;
@@ -43,9 +43,9 @@ public class PayPalStandardHttpClient
     /// </returns>
     public async Task<string> GetPdtDetailsAsync(string tx)
     {
-        var url = _payPalStandardPaymentSettings.UseSandbox ?
-            "https://www.sandbox.paypal.com/us/cgi-bin/webscr" :
-            "https://www.paypal.com/us/cgi-bin/webscr";
+        var url = _payPalStandardPaymentSettings.UseSandbox
+            ? PayPalStandardDefaults.ServiceUrl.Sandbox
+            : PayPalStandardDefaults.ServiceUrl.Live;
         var requestContent = new StringContent($"cmd=_notify-synch&at={_payPalStandardPaymentSettings.PdtToken}&tx={tx}",
             Encoding.UTF8, MimeTypes.ApplicationXWwwFormUrlencoded);
 
@@ -65,9 +65,9 @@ public class PayPalStandardHttpClient
     /// </returns>
     public async Task<string> VerifyIpnAsync(string formString)
     {
-        var url = _payPalStandardPaymentSettings.UseSandbox ?
-            "https://ipnpb.sandbox.paypal.com/cgi-bin/webscr" :
-            "https://ipnpb.paypal.com/cgi-bin/webscr";
+        var url = _payPalStandardPaymentSettings.UseSandbox
+            ? PayPalStandardDefaults.IPNUrl.Sandbox
+            : PayPalStandardDefaults.IPNUrl.Live;
         var requestContent = new StringContent($"cmd=_notify-validate&{formString}",
             Encoding.UTF8, MimeTypes.ApplicationXWwwFormUrlencoded);
 

@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Nop.Core;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
+using Nop.Core.Http;
 using Nop.Plugin.Payments.PayPalStandard.Models;
 using Nop.Services.Common;
 using Nop.Services.Configuration;
@@ -89,7 +90,9 @@ public class PaymentPayPalStandardController : BasePaymentController
             PassProductNamesAndTotals = payPalStandardPaymentSettings.PassProductNamesAndTotals,
             AdditionalFee = payPalStandardPaymentSettings.AdditionalFee,
             AdditionalFeePercentage = payPalStandardPaymentSettings.AdditionalFeePercentage,
-            ActiveStoreScopeConfiguration = storeScope
+            ActiveStoreScopeConfiguration = storeScope,
+            PdtUrl = Url.RouteUrl(PayPalStandardDefaults.Route.PDTHandler, null, _webHelper.GetCurrentRequestProtocol()),
+            IsActive = await _paymentPluginManager.IsPluginActiveAsync(PayPalStandardDefaults.SystemName)
         };
 
         if (storeScope <= 0)
@@ -157,44 +160,35 @@ public class PaymentPayPalStandardController : BasePaymentController
         return Json(new { Result = string.Empty });
     }
 
+    [WwwRequirement]
+    [CheckLanguageSeoCode]
+    [CheckAccessPublicStore]
+    [CheckAccessClosedStore]
     public async Task<IActionResult> PDTHandler()
     {
         var tx = _webHelper.QueryString<string>("tx");
 
-        if (await _paymentPluginManager.LoadPluginBySystemNameAsync("Payments.PayPalStandard") is not PayPalStandardPaymentProcessor processor || !_paymentPluginManager.IsPluginActive(processor))
-            throw new NopException("PayPal Standard module cannot be loaded");
+        var paymentPlugin = await _paymentPluginManager.LoadPluginBySystemNameAsync(PayPalStandardDefaults.SystemName);
+        if (paymentPlugin is not PayPalStandardPaymentProcessor processor)
+            throw new NopException($"{PayPalStandardDefaults.SystemName} module cannot be loaded");
+
+        if (!_paymentPluginManager.IsPluginActive(processor))
+            throw new NopException($"{PayPalStandardDefaults.SystemName} module cannot be loaded");
 
         var (result, values, response) = await processor.GetPdtDetailsAsync(tx);
 
+        async Task<Order> getOrderAsync(string guid) => Guid.TryParse(guid, out var orderGuid) ? await _orderService.GetOrderByGuidAsync(orderGuid) : null;
+
         if (result)
         {
-            var orderNumberGuid = Guid.Empty;
-            
-            try
-            {
-                if (values.TryGetValue("custom", out var orderNumber))
-                    orderNumberGuid = new Guid(orderNumber);
-            }
-            catch
-            {
-                // ignored
-            }
+            var order = values.TryGetValue("custom", out var guid) ? await getOrderAsync(guid) : null;
+            if (order is null)
+                return RedirectToRoute(NopRouteNames.General.HOMEPAGE);
 
-            var order = await _orderService.GetOrderByGuidAsync(orderNumberGuid);
-
-            if (order == null)
-                return RedirectToAction("Index", "Home", new { area = string.Empty });
-
-            var mcGross = decimal.Zero;
-
-            try
-            {
-                mcGross = decimal.Parse(values["mc_gross"], new CultureInfo("en-US"));
-            }
-            catch (Exception exc)
-            {
-                await _logger.ErrorAsync("PayPal PDT. Error getting mc_gross", exc);
-            }
+            var mcGross = values.TryGetValue("mc_gross", out var mcGrossString)
+                && decimal.TryParse(mcGrossString, new CultureInfo("en-US"), out var mcGrossValue)
+                ? mcGrossValue
+                : decimal.Zero;
 
             values.TryGetValue("payer_status", out var payerStatus);
             values.TryGetValue("payment_status", out var paymentStatus);
@@ -224,8 +218,7 @@ public class PaymentPayPalStandardController : BasePaymentController
             var newPaymentStatus = PayPalHelper.GetPaymentStatus(paymentStatus, string.Empty);
             sb.AppendLine("New payment status: " + newPaymentStatus);
 
-            //order note
-            await _orderService.InsertOrderNoteAsync(new OrderNote
+            await _orderService.InsertOrderNoteAsync(new()
             {
                 OrderId = order.Id,
                 Note = sb.ToString(),
@@ -234,14 +227,14 @@ public class PaymentPayPalStandardController : BasePaymentController
             });
 
             //validate order total
-            var orderTotalSentToPayPal = await _genericAttributeService.GetAttributeAsync<decimal?>(order, PayPalHelper.OrderTotalSentToPayPal);
+            var orderTotalSentToPayPal = await _genericAttributeService
+                .GetAttributeAsync<decimal?>(order, PayPalStandardDefaults.OrderTotalAttributeName);
             if (orderTotalSentToPayPal.HasValue && mcGross != orderTotalSentToPayPal.Value)
             {
-                var errorStr = $"PayPal PDT. Returned order total {mcGross} doesn't equal order total {order.OrderTotal}. Order# {order.Id}.";
-                //log
+                var errorStr = $"{PayPalStandardDefaults.SystemName} PDT. Returned order total {mcGross} doesn't equal order total {order.OrderTotal}. Order# {order.Id}.";
                 await _logger.ErrorAsync(errorStr);
-                //order note
-                await _orderService.InsertOrderNoteAsync(new OrderNote
+
+                await _orderService.InsertOrderNoteAsync(new()
                 {
                     OrderId = order.Id,
                     Note = errorStr,
@@ -249,48 +242,36 @@ public class PaymentPayPalStandardController : BasePaymentController
                     CreatedOnUtc = DateTime.UtcNow
                 });
 
-                return RedirectToAction("Index", "Home", new { area = string.Empty });
+                return RedirectToRoute(NopRouteNames.General.HOMEPAGE);
             }
 
             //clear attribute
             if (orderTotalSentToPayPal.HasValue)
-                await _genericAttributeService.SaveAttributeAsync<decimal?>(order, PayPalHelper.OrderTotalSentToPayPal, null);
+                await _genericAttributeService.SaveAttributeAsync<decimal?>(order, PayPalStandardDefaults.OrderTotalAttributeName, null);
 
             if (newPaymentStatus != PaymentStatus.Paid)
-                return RedirectToRoute("CheckoutCompleted", new { orderId = order.Id });
+                return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_COMPLETED, new { orderId = order.Id });
 
             if (!_orderProcessingService.CanMarkOrderAsPaid(order))
-                return RedirectToRoute("CheckoutCompleted", new { orderId = order.Id });
+                return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_COMPLETED, new { orderId = order.Id });
 
             //mark order as paid
             order.AuthorizationTransactionId = txnId;
             await _orderService.UpdateOrderAsync(order);
             await _orderProcessingService.MarkOrderAsPaidAsync(order);
 
-            return RedirectToRoute("CheckoutCompleted", new { orderId = order.Id });
+            return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_COMPLETED, new { orderId = order.Id });
         }
         else
         {
-            if (!values.TryGetValue("custom", out var orderNumber))
-                orderNumber = _webHelper.QueryString<string>("cm");
+            if (!values.TryGetValue("custom", out var guid))
+                guid = _webHelper.QueryString<string>("cm");
 
-            var orderNumberGuid = Guid.Empty;
+            var order = await getOrderAsync(guid);
+            if (order is null)
+                return RedirectToRoute(NopRouteNames.General.HOMEPAGE);
 
-            try
-            {
-                orderNumberGuid = new Guid(orderNumber);
-            }
-            catch
-            {
-                await _logger.ErrorAsync("PayPal PDT failed. " + response);
-            }
-
-            var order = await _orderService.GetOrderByGuidAsync(orderNumberGuid);
-            if (order == null)
-                return RedirectToAction("Index", "Home", new { area = string.Empty });
-
-            //order note
-            await _orderService.InsertOrderNoteAsync(new OrderNote
+            await _orderService.InsertOrderNoteAsync(new()
             {
                 OrderId = order.Id,
                 Note = "PayPal PDT failed. " + response,
@@ -298,21 +279,29 @@ public class PaymentPayPalStandardController : BasePaymentController
                 CreatedOnUtc = DateTime.UtcNow
             });
 
-            return RedirectToRoute("CheckoutCompleted", new { orderId = order.Id });
+            return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_COMPLETED, new { orderId = order.Id });
         }
     }
 
-    public async Task<IActionResult> CancelOrder()
+    [WwwRequirement]
+    [CheckLanguageSeoCode]
+    [CheckAccessPublicStore]
+    [CheckAccessClosedStore]
+    public async Task<IActionResult> CancelOrder(int orderId)
     {
-        var store = await _storeContext.GetCurrentStoreAsync();
+        var order = await _orderService.GetOrderByIdAsync(orderId);
+        if (order is null || order.Deleted)
+            return RedirectToRoute(NopRouteNames.General.HOMEPAGE);
+
         var customer = await _workContext.GetCurrentCustomerAsync();
-        var order = (await _orderService.SearchOrdersAsync(store.Id,
-            customerId: customer.Id, pageSize: 1)).FirstOrDefault();
+        if (customer.Id != order.CustomerId)
+            return Challenge();
 
-        if (order != null)
-            return RedirectToRoute("OrderDetails", new { orderId = order.Id });
+        var store = await _storeContext.GetCurrentStoreAsync();
+        if (store.Id != order.StoreId)
+            return RedirectToRoute(NopRouteNames.General.HOMEPAGE);
 
-        return RedirectToRoute("Homepage");
+        return RedirectToRoute(NopRouteNames.Standard.ORDER_DETAILS, new { orderId = order.Id });
     }
 
     #endregion

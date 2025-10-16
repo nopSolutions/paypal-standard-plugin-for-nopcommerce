@@ -38,46 +38,27 @@ public class PaymentPayPalStandardIpnController : Controller
 
     #region Utilities
 
-    /// <returns>A task that represents the asynchronous operation</returns>
-    protected virtual async Task ProcessRecurringPaymentAsync(string invoiceId, PaymentStatus newPaymentStatus, string transactionId, string ipnInfo)
+    private async Task ProcessRecurringPaymentAsync(Order order, PaymentStatus newPaymentStatus, string transactionId, string ipnInfo)
     {
-        Guid orderNumberGuid;
-
-        try
-        {
-            orderNumberGuid = new Guid(invoiceId);
-        }
-        catch
-        {
-            orderNumberGuid = Guid.Empty;
-        }
-
-        var order = await _orderService.GetOrderByGuidAsync(orderNumberGuid);
-        if (order == null)
-        {
-            await _logger.ErrorAsync("PayPal IPN. Order is not found", new NopException(ipnInfo));
-            return;
-        }
-
         var recurringPayments = await _orderService.SearchRecurringPaymentsAsync(initialOrderId: order.Id);
-
         foreach (var rp in recurringPayments)
+        {
             switch (newPaymentStatus)
             {
                 case PaymentStatus.Authorized:
                 case PaymentStatus.Paid:
-                {
                     var recurringPaymentHistory = await _orderService.GetRecurringPaymentHistoryAsync(rp);
                     if (!recurringPaymentHistory.Any())
-                        await _orderService.InsertRecurringPaymentHistoryAsync(new RecurringPaymentHistory
+                    {
+                        await _orderService.InsertRecurringPaymentHistoryAsync(new()
                         {
                             RecurringPaymentId = rp.Id,
                             OrderId = order.Id,
                             CreatedOnUtc = DateTime.UtcNow
                         });
+                    }
                     else
                     {
-                        //next payments
                         var processPaymentResult = new ProcessPaymentResult
                         {
                             NewPaymentStatus = newPaymentStatus
@@ -87,51 +68,26 @@ public class PaymentPayPalStandardIpnController : Controller
                         else
                             processPaymentResult.CaptureTransactionId = transactionId;
 
-                        await _orderProcessingService.ProcessNextRecurringPaymentAsync(rp,
-                            processPaymentResult);
+                        await _orderProcessingService.ProcessNextRecurringPaymentAsync(rp, processPaymentResult);
                     }
-                }
-
                     break;
+
                 case PaymentStatus.Voided:
-                    //failed payment
-                    var failedPaymentResult = new ProcessPaymentResult
+                    await _orderProcessingService.ProcessNextRecurringPaymentAsync(rp, new()
                     {
                         Errors = new[] { $"PayPal IPN. Recurring payment is {nameof(PaymentStatus.Voided).ToLowerInvariant()} ." },
                         RecurringPaymentFailed = true
-                    };
-                    await _orderProcessingService.ProcessNextRecurringPaymentAsync(rp, failedPaymentResult);
+                    });
                     break;
             }
+        }
 
-        //OrderService.InsertOrderNote(newOrder.OrderId, sb.ToString(), DateTime.UtcNow);
-        await _logger.InformationAsync("PayPal IPN. Recurring info", new NopException(ipnInfo));
+        await _logger.InformationAsync($"{PayPalStandardDefaults.SystemName} IPN. Recurring info", new NopException(ipnInfo));
     }
 
-    /// <returns>A task that represents the asynchronous operation</returns>
-    protected virtual async Task ProcessPaymentAsync(string orderNumber, string ipnInfo, PaymentStatus newPaymentStatus, decimal mcGross, string transactionId)
+    private async Task ProcessPaymentAsync(Order order, string ipnInfo, PaymentStatus newPaymentStatus, decimal mcGross, string transactionId)
     {
-        Guid orderNumberGuid;
-
-        try
-        {
-            orderNumberGuid = new Guid(orderNumber);
-        }
-        catch
-        {
-            orderNumberGuid = Guid.Empty;
-        }
-
-        var order = await _orderService.GetOrderByGuidAsync(orderNumberGuid);
-
-        if (order == null)
-        {
-            await _logger.ErrorAsync("PayPal IPN. Order is not found", new NopException(ipnInfo));
-            return;
-        }
-
-        //order note
-        await _orderService.InsertOrderNoteAsync(new OrderNote
+        await _orderService.InsertOrderNoteAsync(new()
         {
             OrderId = order.Id,
             Note = ipnInfo,
@@ -142,11 +98,10 @@ public class PaymentPayPalStandardIpnController : Controller
         //validate order total
         if ((newPaymentStatus == PaymentStatus.Authorized || newPaymentStatus == PaymentStatus.Paid) && !Math.Round(mcGross, 2).Equals(Math.Round(order.OrderTotal, 2)))
         {
-            var errorStr = $"PayPal IPN. Returned order total {mcGross} doesn't equal order total {order.OrderTotal}. Order# {order.Id}.";
-            //log
+            var errorStr = $"{PayPalStandardDefaults.SystemName} IPN. Returned order total {mcGross} doesn't equal order total {order.OrderTotal}. Order# {order.Id}.";
             await _logger.ErrorAsync(errorStr);
-            //order note
-            await _orderService.InsertOrderNoteAsync(new OrderNote
+
+            await _orderService.InsertOrderNoteAsync(new()
             {
                 OrderId = order.Id,
                 Note = errorStr,
@@ -163,6 +118,7 @@ public class PaymentPayPalStandardIpnController : Controller
                 if (_orderProcessingService.CanMarkOrderAsAuthorized(order))
                     await _orderProcessingService.MarkAsAuthorizedAsync(order);
                 break;
+
             case PaymentStatus.Paid:
                 if (_orderProcessingService.CanMarkOrderAsPaid(order))
                 {
@@ -171,8 +127,8 @@ public class PaymentPayPalStandardIpnController : Controller
 
                     await _orderProcessingService.MarkOrderAsPaidAsync(order);
                 }
-
                 break;
+
             case PaymentStatus.Refunded:
                 var totalToRefund = Math.Abs(mcGross);
                 if (totalToRefund > 0 && Math.Round(totalToRefund, 2).Equals(Math.Round(order.OrderTotal, 2)))
@@ -187,12 +143,11 @@ public class PaymentPayPalStandardIpnController : Controller
                     if (_orderProcessingService.CanPartiallyRefundOffline(order, totalToRefund))
                         await _orderProcessingService.PartiallyRefundOfflineAsync(order, totalToRefund);
                 }
-
                 break;
+
             case PaymentStatus.Voided:
                 if (_orderProcessingService.CanVoidOffline(order))
                     await _orderProcessingService.VoidOfflineAsync(order);
-
                 break;
         }
     }
@@ -207,29 +162,25 @@ public class PaymentPayPalStandardIpnController : Controller
         await Request.Body.CopyToAsync(stream);
         var strRequest = Encoding.ASCII.GetString(stream.ToArray());
 
-        if (await _paymentPluginManager.LoadPluginBySystemNameAsync("Payments.PayPalStandard") is not PayPalStandardPaymentProcessor processor || !_paymentPluginManager.IsPluginActive(processor))
-            throw new NopException("PayPal Standard module cannot be loaded");
+        var paymentPlugin = await _paymentPluginManager.LoadPluginBySystemNameAsync(PayPalStandardDefaults.SystemName);
+        if (paymentPlugin is not PayPalStandardPaymentProcessor processor)
+            return Ok();
+
+        if (!_paymentPluginManager.IsPluginActive(processor))
+            return Ok();
 
         var (result, values) = await processor.VerifyIpnAsync(strRequest);
 
         if (!result)
         {
-            await _logger.ErrorAsync("PayPal IPN failed.", new NopException(strRequest));
-
-            //nothing should be rendered to visitor
+            await _logger.ErrorAsync($"{PayPalStandardDefaults.SystemName} IPN failed.", new NopException(strRequest));
             return Ok();
         }
 
-        var mcGross = decimal.Zero;
-
-        try
-        {
-            mcGross = decimal.Parse(values["mc_gross"], new CultureInfo("en-US"));
-        }
-        catch
-        {
-            // ignored
-        }
+        var mcGross = values.TryGetValue("mc_gross", out var mcGrossString)
+            && decimal.TryParse(mcGrossString, new CultureInfo("en-US"), out var mcGrossValue)
+            ? mcGrossValue
+            : decimal.Zero;
 
         values.TryGetValue("payment_status", out var paymentStatus);
         values.TryGetValue("pending_reason", out var pendingReason);
@@ -249,39 +200,42 @@ public class PaymentPayPalStandardIpnController : Controller
 
         var ipnInfo = sb.ToString();
 
+        async Task<Order> getOrderAsync(string guid)
+        {
+            var order = Guid.TryParse(guid, out var orderGuid) ? await _orderService.GetOrderByGuidAsync(orderGuid) : null;
+            if (order is null)
+                await _logger.ErrorAsync($"{PayPalStandardDefaults.SystemName} IPN. Order is not found", new NopException(ipnInfo));
+
+            return order;
+        }
+
+        Order order;
         switch (txnType)
         {
             case "recurring_payment":
-                await ProcessRecurringPaymentAsync(rpInvoiceId, newPaymentStatus, txnId, ipnInfo);
+                order = await getOrderAsync(rpInvoiceId);
+                if (order is not null)
+                    await ProcessRecurringPaymentAsync(order, newPaymentStatus, txnId, ipnInfo);
                 break;
-            case "recurring_payment_failed":
-                if (Guid.TryParse(rpInvoiceId, out var orderGuid))
-                {
-                    var order = await _orderService.GetOrderByGuidAsync(orderGuid);
-                    if (order != null)
-                    {
-                        var recurringPayment = (await _orderService.SearchRecurringPaymentsAsync(initialOrderId: order.Id))
-                            .FirstOrDefault();
-                        //failed payment
-                        if (recurringPayment != null)
-                            await _orderProcessingService.ProcessNextRecurringPaymentAsync(recurringPayment,
-                                new ProcessPaymentResult
-                                {
-                                    Errors = new[] { txnType },
-                                    RecurringPaymentFailed = true
-                                });
-                    }
-                }
 
+            case "recurring_payment_failed":
+                order = await getOrderAsync(rpInvoiceId);
+                if (order is null)
+                    break;
+
+                var recurringPayment = (await _orderService.SearchRecurringPaymentsAsync(initialOrderId: order.Id)).FirstOrDefault();
+                if (recurringPayment is not null)
+                    await _orderProcessingService.ProcessNextRecurringPaymentAsync(recurringPayment, new() { Errors = [txnType], RecurringPaymentFailed = true });
                 break;
+
             default:
                 values.TryGetValue("custom", out var orderNumber);
-                await ProcessPaymentAsync(orderNumber, ipnInfo, newPaymentStatus, mcGross, txnId);
-
+                order = await getOrderAsync(orderNumber);
+                if (order is not null)
+                    await ProcessPaymentAsync(order, ipnInfo, newPaymentStatus, mcGross, txnId);
                 break;
         }
 
-        //nothing should be rendered to visitor
         return Ok();
     }
 
